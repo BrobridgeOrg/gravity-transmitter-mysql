@@ -2,6 +2,7 @@ package writer
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,6 +12,12 @@ import (
 	"github.com/jmoiron/sqlx"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+)
+
+var (
+	UpdateTemplate = `UPDATE "%s" SET %s WHERE "%s" = :primary_val`
+	InsertTemplate = `INSERT INTO "%s" (%s) VALUES (%s)`
+	DeleteTemplate = `DELETE FROM "%s" WHERE "%s" = :primary_val`
 )
 
 type DatabaseInfo struct {
@@ -119,12 +126,19 @@ func (writer *Writer) run() {
 
 func (writer *Writer) ProcessData(record *transmitter.Record) error {
 
+	log.WithFields(log.Fields{
+		"method": record.Method,
+		"event":  record.EventName,
+		"table":  record.Table,
+	}).Info("Write record")
+
 	switch record.Method {
 	case transmitter.Method_DELETE:
 		return writer.DeleteRecord(record)
 	case transmitter.Method_UPDATE:
 		return writer.UpdateRecord(record)
 	case transmitter.Method_INSERT:
+		return writer.InsertRecord(record)
 	}
 
 	return nil
@@ -149,7 +163,7 @@ func (writer *Writer) GetValue(value *transmitter.Value) interface{} {
 	return value.Value
 }
 
-func (writer *Writer) GetDefinition(record *transmitter.Record) *RecordDef {
+func (writer *Writer) GetDefinition(record *transmitter.Record) (*RecordDef, error) {
 
 	recordDef := &RecordDef{
 		HasPrimary: false,
@@ -163,7 +177,8 @@ func (writer *Writer) GetDefinition(record *transmitter.Record) *RecordDef {
 		value := writer.GetValue(field.Value)
 
 		// Primary key
-		if field.IsPrimary == true {
+		//if field.IsPrimary == true {
+		if record.PrimaryKey == field.Name {
 			recordDef.Values["primary_val"] = value
 			recordDef.HasPrimary = true
 			recordDef.PrimaryColumn = field.Name
@@ -182,29 +197,37 @@ func (writer *Writer) GetDefinition(record *transmitter.Record) *RecordDef {
 		})
 	}
 
-	return recordDef
+	if len(record.PrimaryKey) > 0 && !recordDef.HasPrimary {
+		log.WithFields(log.Fields{
+			"column": record.PrimaryKey,
+		}).Error("Not found primary key")
+
+		return nil, errors.New("Not found primary key")
+	}
+
+	return recordDef, nil
 }
 
 func (writer *Writer) InsertRecord(record *transmitter.Record) error {
 
-	recordDef := writer.GetDefinition(record)
+	recordDef, err := writer.GetDefinition(record)
+	if err != nil {
+		return err
+	}
 
 	return writer.insert(record.Table, recordDef)
 }
 
 func (writer *Writer) UpdateRecord(record *transmitter.Record) error {
 
-	recordDef := writer.GetDefinition(record)
+	recordDef, err := writer.GetDefinition(record)
+	if err != nil {
+		return err
+	}
 
 	// Ignore if no primary key
 	if recordDef.HasPrimary == false {
 		return nil
-	}
-
-	// TODO: performance issue because do twice for each record
-	err := writer.insert(record.Table, recordDef)
-	if err != nil {
-		return err
 	}
 
 	_, err = writer.update(record.Table, recordDef)
@@ -217,16 +240,20 @@ func (writer *Writer) UpdateRecord(record *transmitter.Record) error {
 
 func (writer *Writer) DeleteRecord(record *transmitter.Record) error {
 
-	template := "DELETE FROM `%s` WHERE `%s` = :primary_val"
+	if record.PrimaryKey == "" {
+		// Do nothing
+		return nil
+	}
 
 	for _, field := range record.Fields {
 
 		// Primary key
-		if field.IsPrimary == true {
+		//if field.IsPrimary == true {
+		if record.PrimaryKey == field.Name {
 
 			value := writer.GetValue(field.Value)
 
-			sqlStr := fmt.Sprintf(template, record.Table, field.Name)
+			sqlStr := fmt.Sprintf(DeleteTemplate, record.Table, field.Name)
 
 			writer.commands <- &DBCommand{
 				QueryStr: sqlStr,
@@ -246,13 +273,12 @@ func (writer *Writer) update(table string, recordDef *RecordDef) (bool, error) {
 
 	// Preparing SQL string
 	updates := make([]string, 0, len(recordDef.ColumnDefs))
-	template := "UPDATE `%s` SET %s WHERE `%s` = :primary_val"
 	for _, def := range recordDef.ColumnDefs {
 		updates = append(updates, "`"+def.ColumnName+"` = :"+def.BindingName)
 	}
 
 	updateStr := strings.Join(updates, ",")
-	sqlStr := fmt.Sprintf(template, table, updateStr, recordDef.PrimaryColumn)
+	sqlStr := fmt.Sprintf(UpdateTemplate, table, updateStr, recordDef.PrimaryColumn)
 
 	writer.commands <- &DBCommand{
 		QueryStr: sqlStr,
@@ -264,12 +290,18 @@ func (writer *Writer) update(table string, recordDef *RecordDef) (bool, error) {
 
 func (writer *Writer) insert(table string, recordDef *RecordDef) error {
 
-	// Insert a new record
-	colNames := []string{
-		recordDef.PrimaryColumn,
+	paramLength := len(recordDef.ColumnDefs)
+	if recordDef.HasPrimary {
+		paramLength++
 	}
-	valNames := []string{
-		":primary_val",
+
+	// Allocation
+	colNames := make([]string, 0, paramLength)
+	valNames := make([]string, 0, paramLength)
+
+	if recordDef.HasPrimary {
+		colNames = append(colNames, `"`+recordDef.PrimaryColumn+`"`)
+		valNames = append(valNames, ":primary_val")
 	}
 
 	// Preparing columns and bindings
@@ -278,12 +310,10 @@ func (writer *Writer) insert(table string, recordDef *RecordDef) error {
 		valNames = append(valNames, `:`+def.BindingName)
 	}
 
-	template := "INSERT INTO `%s` (%s) VALUES (%s)"
-
 	// Preparing SQL string to insert
 	colsStr := strings.Join(colNames, ",")
 	valsStr := strings.Join(valNames, ",")
-	insertStr := fmt.Sprintf(template, table, colsStr, valsStr)
+	insertStr := fmt.Sprintf(InsertTemplate, table, colsStr, valsStr)
 
 	//	database.db.NamedExec(insertStr, recordDef.Values)
 	writer.commands <- &DBCommand{
