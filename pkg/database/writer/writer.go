@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -15,9 +16,12 @@ import (
 )
 
 var (
-	UpdateTemplate = `UPDATE "%s" SET %s WHERE "%s" = :primary_val`
-	InsertTemplate = `INSERT INTO "%s" (%s) VALUES (%s)`
-	DeleteTemplate = `DELETE FROM "%s" WHERE "%s" = :primary_val`
+	//UpdateTemplate = `UPDATE "%s" SET %s WHERE "%s" = :primary_val`
+	UpdateTemplate = "UPDATE `%s` SET %s WHERE `%s` = :primary_val"
+	//InsertTemplate = `INSERT INTO "%s" (%s) VALUES (%s)`
+	InsertTemplate = "INSERT INTO `%s` (%s) VALUES (%s)"
+	//DeleteTemplate = `DELETE FROM "%s" WHERE "%s" = :primary_val`
+	DeleteTemplate = "DELETE FROM `%s` WHERE `%s` = :primary_val"
 )
 
 type DatabaseInfo struct {
@@ -148,7 +152,7 @@ func (writer *Writer) GetValue(value *transmitter.Value) interface{} {
 
 	switch value.Type {
 	case transmitter.DataType_FLOAT64:
-		return float64(binary.LittleEndian.Uint64(value.Value))
+		return math.Float64frombits(binary.LittleEndian.Uint64(value.Value))
 	case transmitter.DataType_INT64:
 		return int64(binary.LittleEndian.Uint64(value.Value))
 	case transmitter.DataType_UINT64:
@@ -300,7 +304,7 @@ func (writer *Writer) insert(table string, recordDef *RecordDef) error {
 	valNames := make([]string, 0, paramLength)
 
 	if recordDef.HasPrimary {
-		colNames = append(colNames, `"`+recordDef.PrimaryColumn+`"`)
+		colNames = append(colNames, "`"+recordDef.PrimaryColumn+"`")
 		valNames = append(valNames, ":primary_val")
 	}
 
