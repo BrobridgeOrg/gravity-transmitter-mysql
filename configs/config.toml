@@ -1,5 +1,14 @@
-[service]
-port = 44143
+[gravity]
+host = 44143
+
+[subscriber]
+subscriber_id = "mysql_transmitter"
+subscriber_name = "Mysql Transmitter"
+state_store = "./statestore"
+worker_count = 16
+
+[rules]
+subscription = "./settings/subscriptions.json"
 
 [database]
 host = "0.0.0.0"
