@@ -4,10 +4,10 @@ The gravity transmitter is used to write data to MySQL database.
 
 ## Installation
 
-You can compile pilotware with the following commands:
+You can compile gravity-transmitter-mysql with the following commands:
 
 ```shell
-go build ./cmd/gravity-transmitter-postgres
+go build ./cmd/gravity-transmitter-mysql
 ```
 
 ## License
