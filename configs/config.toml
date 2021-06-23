@@ -1,4 +1,5 @@
 [gravity]
+domain = "gravity"
 host = 44143
 
 [subscriber]
