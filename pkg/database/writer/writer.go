@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gravity_sdk_types_record "github.com/BrobridgeOrg/gravity-sdk/types/record"
@@ -24,6 +25,12 @@ var (
 	//DeleteTemplate = `DELETE FROM "%s" WHERE "%s" = :primary_val`
 	DeleteTemplate = "DELETE FROM `%s` WHERE `%s` = :primary_val"
 )
+
+var recordDefPool = sync.Pool{
+	New: func() interface{} {
+		return &gravity_sdk_types_record.RecordDef{}
+	},
+}
 
 type DatabaseInfo struct {
 	Host     string `json:"host"`
@@ -181,6 +188,8 @@ func (writer *Writer) processData(dbCommands []*DBCommand) {
 
 	for _, cmd := range dbCommands {
 		writer.completionHandler(database.DBCommand(cmd))
+		recordDefPool.Put(cmd.RecordDef)
+		dbCommandPool.Put(cmd)
 	}
 }
 
@@ -200,14 +209,6 @@ func (writer *Writer) SetCompletionHandler(fn database.CompletionHandler) {
 
 func (writer *Writer) ProcessData(reference interface{}, record *gravity_sdk_types_record.Record) error {
 
-	/*
-		log.WithFields(log.Fields{
-			"method": record.Method,
-			"event":  record.EventName,
-			"table":  record.Table,
-		}).Info("Write record")
-	*/
-
 	switch record.Method {
 	case gravity_sdk_types_record.Method_DELETE:
 		return writer.DeleteRecord(reference, record)
@@ -222,11 +223,10 @@ func (writer *Writer) ProcessData(reference interface{}, record *gravity_sdk_typ
 
 func (writer *Writer) GetDefinition(record *gravity_sdk_types_record.Record) (*gravity_sdk_types_record.RecordDef, error) {
 
-	recordDef := &gravity_sdk_types_record.RecordDef{
-		HasPrimary: false,
-		Values:     make(map[string]interface{}),
-		ColumnDefs: make([]*gravity_sdk_types_record.ColumnDef, 0, len(record.Fields)),
-	}
+	recordDef := recordDefPool.Get().(*gravity_sdk_types_record.RecordDef)
+	recordDef.HasPrimary = false
+	recordDef.Values = make(map[string]interface{})
+	recordDef.ColumnDefs = make([]*gravity_sdk_types_record.ColumnDef, 0, len(record.Fields))
 
 	// Scanning fields
 	for n, field := range record.Fields {
@@ -312,14 +312,14 @@ func (writer *Writer) DeleteRecord(reference interface{}, record *gravity_sdk_ty
 
 			sqlStr := fmt.Sprintf(DeleteTemplate, record.Table, field.Name)
 
-			writer.commands <- &DBCommand{
-				Reference: reference,
-				Record:    record,
-				QueryStr:  sqlStr,
-				Args: map[string]interface{}{
-					"primary_val": value,
-				},
+			dbCommand := dbCommandPool.Get().(*DBCommand)
+			dbCommand.Reference = reference
+			dbCommand.Record = record
+			dbCommand.QueryStr = sqlStr
+			dbCommand.Args = map[string]interface{}{
+				"primary_val": value,
 			}
+			writer.commands <- dbCommand
 
 			break
 		}
@@ -339,12 +339,14 @@ func (writer *Writer) update(reference interface{}, record *gravity_sdk_types_re
 	updateStr := strings.Join(updates, ",")
 	sqlStr := fmt.Sprintf(UpdateTemplate, table, updateStr, recordDef.PrimaryColumn)
 
-	writer.commands <- &DBCommand{
-		Reference: reference,
-		Record:    record,
-		QueryStr:  sqlStr,
-		Args:      recordDef.Values,
-	}
+	dbCommand := dbCommandPool.Get().(*DBCommand)
+	dbCommand.Reference = reference
+	dbCommand.Record = record
+	dbCommand.QueryStr = sqlStr
+	dbCommand.Args = recordDef.Values
+	dbCommand.RecordDef = recordDef
+
+	writer.commands <- dbCommand
 
 	return false, nil
 }
@@ -377,12 +379,15 @@ func (writer *Writer) insert(reference interface{}, record *gravity_sdk_types_re
 	insertStr := fmt.Sprintf(InsertTemplate, table, colsStr, valsStr)
 
 	//	database.db.NamedExec(insertStr, recordDef.Values)
-	writer.commands <- &DBCommand{
-		Reference: reference,
-		Record:    record,
-		QueryStr:  insertStr,
-		Args:      recordDef.Values,
-	}
+
+	dbCommand := dbCommandPool.Get().(*DBCommand)
+	dbCommand.Reference = reference
+	dbCommand.Record = record
+	dbCommand.QueryStr = insertStr
+	dbCommand.Args = recordDef.Values
+	dbCommand.RecordDef = recordDef
+
+	writer.commands <- dbCommand
 
 	return nil
 }
